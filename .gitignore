@@ -1,0 +1,16 @@
+/*
+!/tools/
+!/docs/
+!/.gitignore
+.env
+.env.*
+*.key
+*.pem
+*secret*
+*token*
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.zip
+*.bak
