@@ -14,7 +14,8 @@ DEFAULT = DRY RUN: files are written to a local folder only (nothing uploaded, d
 files.kampus-link.com and check its hash, THEN cdn_set_path (the publish switch). Any failure =
 the switch is not set and phones keep using Supabase.
 
-Environment (type in PowerShell with Read-Host, never save in a file):
+The script ASKS for what it needs (secrets hidden, never saved; public values remembered in
+tools/cdn_local.json, which is not in git). Environment variables with these names still win:
   KAMPUS_SUPABASE_URL, KAMPUS_SERVICE_KEY                       (always: reads the export)
   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET  (only with --upload)
 Needs backend file 54 (cdn_module_export, cdn_set_path).
@@ -169,12 +170,48 @@ def write_local(out, files, manifest_key, manifest_bytes):
             f.write(b)
 
 
+LOCAL_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cdn_local.json")  # NOT secrets, not in git
+PUBLIC_NAMES = {"KAMPUS_SUPABASE_URL": "Supabase project URL (https://....supabase.co)",
+                "R2_ACCOUNT_ID": "Cloudflare account ID", "R2_BUCKET": "R2 bucket name"}
+SECRET_NAMES = {"KAMPUS_SERVICE_KEY": "Supabase SECRET key", "R2_ACCESS_KEY_ID": "R2 Access Key ID",
+                "R2_SECRET_ACCESS_KEY": "R2 Secret Access Key"}
+
+
+def ask_missing(upload):
+    """Asks what is missing. Public values are remembered in tools/cdn_local.json; secrets are typed hidden,
+    live only in this run, and are never written anywhere."""
+    import getpass
+    try:
+        with open(LOCAL_CFG, encoding="utf-8") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        saved = {}
+    need_public = ["KAMPUS_SUPABASE_URL"] + (["R2_ACCOUNT_ID", "R2_BUCKET"] if upload else [])
+    need_secret = ["KAMPUS_SERVICE_KEY"] + (["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"] if upload else [])
+    changed = False
+    for n in need_public:
+        if not os.environ.get(n):
+            v = saved.get(n) or input(PUBLIC_NAMES[n] + ": ").strip()
+            if n not in saved:
+                saved[n] = v
+                changed = True
+            os.environ[n] = v
+    for n in need_secret:
+        if not os.environ.get(n):
+            os.environ[n] = getpass.getpass(SECRET_NAMES[n] + " (hidden, not saved): ").strip()
+    if changed:
+        with open(LOCAL_CFG, "w", encoding="utf-8") as f:
+            json.dump(saved, f, indent=1)
+        print(f"(remembered the public values in {LOCAL_CFG}; delete the file to change them)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--module-id", required=True, help="one id or a comma list")
     ap.add_argument("--out", default="_cdn_out")
     ap.add_argument("--upload", action="store_true", help="ONLY when the senior engineer says go")
     args = ap.parse_args()
+    ask_missing(args.upload)
     ids = [int(x) for x in args.module_id.split(",") if x.strip()]
     r2 = R2() if args.upload else None
     for mid in ids:
