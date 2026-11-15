@@ -14,8 +14,8 @@ DEFAULT = DRY RUN: files are written to a local folder only (nothing uploaded, d
 files.kampus-link.com and check its hash, THEN cdn_set_path (the publish switch). Any failure =
 the switch is not set and phones keep using Supabase.
 
-The script ASKS for what it needs (secrets hidden, never saved; public values remembered in
-tools/cdn_local.json, which is not in git). Environment variables with these names still win:
+The script ASKS for what it needs once: public values go to tools/cdn_local.json (not in git), keys go to the
+Windows Credential Manager when "pip install keyring" was done (else typed hidden each run). --forget-keys deletes them. Environment variables with these names still win:
   KAMPUS_SUPABASE_URL, KAMPUS_SERVICE_KEY                       (always: reads the export)
   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET  (only with --upload)
 Needs backend file 54 (cdn_module_export, cdn_set_path).
@@ -23,6 +23,7 @@ Needs backend file 54 (cdn_module_export, cdn_set_path).
 import argparse, datetime, hashlib, hmac, json, os, secrets, sys, time, urllib.error, urllib.parse, urllib.request
 
 PUBLIC_BASE = "https://files.kampus-link.com/"
+UA = {"User-Agent": "KampusLink-publisher/1.0"}   # Cloudflare answers 403 to the default Python-urllib agent
 CACHE = "public, max-age=31536000, immutable"
 
 
@@ -41,7 +42,7 @@ def rpc(name, args):
     key = os.environ.get("KAMPUS_SERVICE_KEY", "").strip()
     if not url or not key:
         raise SystemExit("Set KAMPUS_SUPABASE_URL and KAMPUS_SERVICE_KEY in this PowerShell session first.")
-    headers = {"apikey": key, "Content-Type": "application/json"}
+    headers = {"apikey": key, "Content-Type": "application/json", **UA}
     if not key.startswith("sb_"):          # legacy JWT keys also go in Authorization; new sb_ keys only in apikey
         headers["Authorization"] = f"Bearer {key}"
     body = json.dumps(args).encode()
@@ -118,13 +119,15 @@ class R2:
 
 
 def public_get(key):
+    req = urllib.request.Request(PUBLIC_BASE + key, headers=UA)
     try:
-        with urllib.request.urlopen(PUBLIC_BASE + key, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=60) as r:
             return r.read()
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
-        raise
+        raise SystemExit(f"Reading {PUBLIC_BASE}{key} gave HTTP {e.code}. Check in Cloudflare: the bucket's Custom Domain is "
+                         f"files.kampus-link.com, and Security -> Bots / WAF do not block it. Nothing was published.")
 
 
 # ---------------------------------------------------------------- build
@@ -187,9 +190,33 @@ SECRET_NAMES = {"KAMPUS_SERVICE_KEY": "Supabase SECRET key", "R2_ACCESS_KEY_ID":
                 "R2_SECRET_ACCESS_KEY": "R2 Secret Access Key"}
 
 
+KEYRING_SERVICE = "kampuslink-cdn-publish"
+
+
+def _keyring():
+    try:
+        import keyring
+        return keyring
+    except ImportError:
+        return None
+
+
+def forget_keys():
+    kr = _keyring()
+    if not kr:
+        print("keyring not installed: nothing saved.")
+        return
+    for n in SECRET_NAMES:
+        try:
+            kr.delete_password(KEYRING_SERVICE, n)
+        except Exception:
+            pass
+    print("Saved keys deleted from Windows Credential Manager.")
+
+
 def ask_missing(upload):
-    """Asks what is missing. Public values are remembered in tools/cdn_local.json; secrets are typed hidden,
-    live only in this run, and are never written anywhere."""
+    """Public values: tools/cdn_local.json. Secrets: Windows Credential Manager (encrypted for this Windows user)
+    when the 'keyring' package is installed, otherwise typed hidden at every run. Never in a file, never in git."""
     import getpass
     try:
         with open(LOCAL_CFG, encoding="utf-8") as f:
@@ -206,9 +233,17 @@ def ask_missing(upload):
                 saved[n] = v
                 changed = True
             os.environ[n] = v
+    kr = _keyring()
     for n in need_secret:
-        if not os.environ.get(n):
-            os.environ[n] = getpass.getpass(SECRET_NAMES[n] + " (hidden, not saved): ").strip()
+        if os.environ.get(n):
+            continue
+        v = kr.get_password(KEYRING_SERVICE, n) if kr else None
+        if not v:
+            v = getpass.getpass(SECRET_NAMES[n] + " (hidden): ").strip()
+            if kr and v:
+                kr.set_password(KEYRING_SERVICE, n, v)
+                print(f"  saved in Windows Credential Manager ({SECRET_NAMES[n]})")
+        os.environ[n] = v
     if changed:
         with open(LOCAL_CFG, "w", encoding="utf-8") as f:
             json.dump(saved, f, indent=1)
@@ -217,10 +252,16 @@ def ask_missing(upload):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--module-id", required=True, help="one id or a comma list")
+    ap.add_argument("--module-id", default="", help="one id or a comma list")
     ap.add_argument("--out", default="_cdn_out")
     ap.add_argument("--upload", action="store_true", help="ONLY when the senior engineer says go")
+    ap.add_argument("--forget-keys", action="store_true", help="delete the saved keys and stop")
     args = ap.parse_args()
+    if args.forget_keys:
+        forget_keys()
+        return
+    if not args.module_id.strip():
+        raise SystemExit("--module-id is required (e.g. --module-id 1005)")
     ask_missing(args.upload)
     ids = [int(x) for x in args.module_id.split(",") if x.strip()]
     r2 = R2() if args.upload else None
