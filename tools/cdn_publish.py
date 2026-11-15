@@ -22,6 +22,8 @@ Needs backend file 54 (cdn_module_export, cdn_set_path).
 """
 import argparse, datetime, hashlib, hmac, json, os, secrets, socket, sys, time, urllib.error, urllib.parse, urllib.request
 
+import duel_pool
+
 # Some home routers have broken IPv6: the connection opens but data never comes (seen on the founder PC:
 # curl took 12 s, Python timed out). Cloudflare and Supabase both answer on IPv4, so use IPv4 only here.
 _getaddrinfo = socket.getaddrinfo
@@ -185,11 +187,15 @@ def build(export):
                       "duration_min": x.get("duration_min"), "total_points": x.get("total_points"),
                       "title": x.get("title"), "exercises": len(x.get("exercises") or []),
                       "rev": ref["sha256"], **ref})
+    duels = []
+    for ch, entries in sorted(duel_pool.build_pools(json.loads(json.dumps(export))).items()):
+        duels.append({"chapter_ref": ch, "count": len(entries), "kinds": duel_pool.summary(entries),
+                      **add({"schema": 1, "module_id": export["module_id"], "chapter_ref": ch, "entries": entries})})
     manifest = {
         "schema": 1, "module": export["module"], "module_id": export["module_id"], "version": export["version"],
         "generated_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
         "lessons": lessons, "extras": {"rev": extras["sha256"], **extras},
-        "practice": practice, "exams": exams,
+        "practice": practice, "exams": exams, "duels": duels,
         "files": len(files), "bytes": sum(len(b) for b in files.values()),
     }
     return files, manifest
@@ -296,8 +302,13 @@ def main():
         token = secrets.token_hex(8)
         mkey = f"v1/m/{mid}/{export['version']}-{token}/manifest.json"
         mbytes = canon(manifest)
+        pool = {}
+        for d in manifest["duels"]:
+            for k, n in d["kinds"].items():
+                pool[k] = pool.get(k, 0) + n
         print(f"\n=== module {mid} v{export['version']}: {len(manifest['lessons'])} lessons, "
               f"{len(manifest['practice'])} practice chapters, {len(manifest['exams'])} exams, "
+              f"duel pool {sum(pool.values())} {pool}, "
               f"{manifest['files']} files, {round(manifest['bytes'] / 1024)} KB")
         write_local(args.out, files, mkey, mbytes)
         print(f"  written to {os.path.join(args.out, 'v1')}  (manifest {mkey})")
