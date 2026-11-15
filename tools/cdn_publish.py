@@ -38,17 +38,27 @@ def sha(b):
 # ---------------------------------------------------------------- Supabase (service role)
 def rpc(name, args):
     url = os.environ.get("KAMPUS_SUPABASE_URL", "").rstrip("/")
-    key = os.environ.get("KAMPUS_SERVICE_KEY", "")
+    key = os.environ.get("KAMPUS_SERVICE_KEY", "").strip()
     if not url or not key:
         raise SystemExit("Set KAMPUS_SUPABASE_URL and KAMPUS_SERVICE_KEY in this PowerShell session first.")
-    req = urllib.request.Request(f"{url}/rest/v1/rpc/{name}", data=json.dumps(args).encode(), method="POST",
-                                 headers={"apikey": key, "Authorization": f"Bearer {key}",
-                                          "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise SystemExit(f"{name} failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:300]}")
+    headers = {"apikey": key, "Content-Type": "application/json"}
+    if not key.startswith("sb_"):          # legacy JWT keys also go in Authorization; new sb_ keys only in apikey
+        headers["Authorization"] = f"Bearer {key}"
+    body = json.dumps(args).encode()
+    for attempt in range(4):
+        req = urllib.request.Request(f"{url}/rest/v1/rpc/{name}", data=body, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            text = e.read().decode("utf-8", "replace")[:300]
+            if "PGRST303" in text and attempt < 3:      # clock gap between Supabase servers: wait and retry
+                print(f"  {name}: Supabase clock gap (PGRST303), retry in 10 s...")
+                time.sleep(10)
+                continue
+            kind = "sb_secret" if key.startswith("sb_secret_") else ("sb_publishable (WRONG key)" if key.startswith("sb_publishable_")
+                    else ("legacy JWT" if key.startswith("eyJ") else "unknown format"))
+            raise SystemExit(f"{name} failed: HTTP {e.code} {text}\n  key type sent: {kind}, length {len(key)}")
 
 
 # ---------------------------------------------------------------- R2 (S3 API, AWS SigV4)
