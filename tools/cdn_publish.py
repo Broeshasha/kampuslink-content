@@ -20,7 +20,20 @@ Windows Credential Manager when "pip install keyring" was done (else typed hidde
   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET  (only with --upload)
 Needs backend file 54 (cdn_module_export, cdn_set_path).
 """
-import argparse, datetime, hashlib, hmac, json, os, secrets, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, datetime, hashlib, hmac, json, os, secrets, socket, sys, time, urllib.error, urllib.parse, urllib.request
+
+# Some home routers have broken IPv6: the connection opens but data never comes (seen on the founder PC:
+# curl took 12 s, Python timed out). Cloudflare and Supabase both answer on IPv4, so use IPv4 only here.
+_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_first(host, *a, **k):
+    res = _getaddrinfo(host, *a, **k)
+    v4 = [r for r in res if r[0] == socket.AF_INET]
+    return v4 or res
+
+
+socket.getaddrinfo = _ipv4_first
 
 PUBLIC_BASE = "https://files.kampus-link.com/"
 UA = {"User-Agent": "KampusLink-publisher/1.0"}   # Cloudflare answers 403 to the default Python-urllib agent
@@ -118,16 +131,23 @@ class R2:
             time.sleep(2 * (attempt + 1))
 
 
-def public_get(key):
-    req = urllib.request.Request(PUBLIC_BASE + key, headers=UA)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return r.read()
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        raise SystemExit(f"Reading {PUBLIC_BASE}{key} gave HTTP {e.code}. Check in Cloudflare: the bucket's Custom Domain is "
-                         f"files.kampus-link.com, and Security -> Bots / WAF do not block it. Nothing was published.")
+def public_get(key, tries=3):
+    """The public file, or None when it is not there (404). Network trouble -> retried, then a clear stop."""
+    for attempt in range(tries):
+        req = urllib.request.Request(PUBLIC_BASE + key, headers=UA)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise SystemExit(f"Reading {PUBLIC_BASE}{key} gave HTTP {e.code}. Check in Cloudflare: the bucket's Custom Domain "
+                             f"is files.kampus-link.com, and Security -> Bots / WAF do not block it. Nothing was published.")
+        except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError) as e:
+            if attempt == tries - 1:
+                raise SystemExit(f"files.kampus-link.com did not answer ({e}). Check the internet and run again: "
+                                 f"files already uploaded are skipped. Nothing was published.")
+            time.sleep(3 * (attempt + 1))
 
 
 # ---------------------------------------------------------------- build
